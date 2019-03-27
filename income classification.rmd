@@ -1,0 +1,541 @@
+---
+title: IncomeTarget Classification
+author: "shambhuraj"
+date: "January 12, 2019"
+output: 
+  html_document:
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning=FALSE,message=FALSE)
+```
+
+## Dataset Description
+
+Predictor variables:
+- age 
+- working_sector: sector under which the employee is working 
+- financial_weight: weighted attribute to balance the difference in the monetary and working conditions.
+- qualification: Educational qualification 
+- years_of_education: number of years of education 
+- tax paid: amount of tax paid by the person
+- loan taken: whether the person has taken loan or no 
+- marital status
+- occupation : area of work
+- relationship : provides relationship status of the employee 
+- ethnicity
+- gender: Male, Female 
+- gain : it illustrates the financial gain of an person 
+- loss: financial loss of the person 
+- working_hours : hours of work of an employee in a week 
+- country: describes the origin country of an employee 
+
+- Response Variable -->
+- target: classify a person into high income / low income.
+
+## Setup Environment
+- Note - use of 'dummy check' steps are for debug purpose and are used at important places only.
+
+```{r}
+library(dplyr)
+library(ggcorrplot)
+library(car) 
+library(caret) 
+library(e1071)
+library(mice)
+library(randomForest)
+library(plotROC)
+library(ggplot2)
+library(pROC, quietly=TRUE)
+library(ROCR, quietly=TRUE)
+
+#clear the environment
+rm(list=ls(all=TRUE))
+
+#set working directory
+setwd("F:/insofe/cute")
+
+#read source data - train_data.csv
+income.train <- read.csv("F:/insofe/cute/train_data.csv")
+
+
+#clear index column
+income.train = income.train[ , !(names(income.train) %in% "index")]
+```
+
+## View and Summarize Data
+```{r}
+head(income.train)
+```
+```{r}
+#Check structure of the data
+dim(income.train)
+str(income.train)
+```
+```{r}
+#summarize data
+summary(income.train)
+```
+```{r}
+table(income.train$target)
+```
+- Class ( 0 & 1) imbalance present
+
+## Clean Data
+### Treat NA values
+```{r}
+#check Presence of NAs
+table(complete.cases (income.train))
+```
+- Approx. 7.5% rows contain NAs
+- 'tax_paid' variable has 29206 NAs which is 92.5% of the total records available in dataset. Remove.
+
+```{r}
+#remove tax_paid variable as it may not be a good predictor once imputed. Moreover it might not result into information loss.
+income.train = select(income.train, -tax_paid)
+```
+
+```{r}
+table(income.train [!complete.cases(income.train),c("target")])
+#out of 2321 NAs, 86% belong to class '0'. We already have ~enough data left (23968 - 2001 = 21967 i.e. ~92%) if these NAs are removed completely instead of imputation. So this might not result into information loss.
+```
+
+```{r}
+#remove NA rows completely and keep complete cases only.
+income.train = income.train [complete.cases(income.train),]
+#dummy check
+sum(is.na(income.train))
+dim(income.train)
+head(income.train)
+```
+### Check and Remove Duplicates
+```{r}
+table(duplicated(income.train))
+#removing duplicate records
+income.train = income.train[!duplicated(income.train),]
+#dummy check
+dim(income.train)
+```
+## Explore and Rework Data
+### Split into Numeric and Categorical data
+```{r}
+num_vector = c("age","financial_weight","years_of_education","loan_taken","gain","loss","working_hours")
+cat_vector = c("working_sector","qualification","marital_status","occupation","relationship","ethnicity","gender","country","target")
+
+#create two separate data frames
+income.train.num = income.train[num_vector]
+income.train.cat = income.train[cat_vector]
+
+#dummy check
+names(income.train.num)
+names(income.train.cat)
+```
+```{r}
+#convert 'target' variable to factor
+income.train.cat$target = as.factor(income.train.cat$target)
+#dummy check
+levels(income.train.cat$target)
+```
+### Rework numerical data
+```{r}
+#do we need both years of education and qualification as both convey the same meaning. Dropping one might not result into information loss
+#dummy check
+table(income.train.num$years_of_education,income.train.cat$qualification)
+```
+
+```{r}
+income.train.num = select(income.train.num,-years_of_education)
+#dummy check
+names(income.train.num)
+```
+- No need to scale, bin existing numeric variables.
+- Find out whether any correlation exists between numeric variables?
+```{r}
+income.cor = round(cor(income.train.num), 1)
+head(income.cor[, 1:6])
+```
+- No correlation between numric variables
+### Rework categorical data
+```{r}
+#dummy check
+str(income.train.cat)
+```
+- Convert 'qualification' into ordinal variable after removing years of education.No Information Loss.
+```{r}
+income.train.cat$qualification = ordered (income.train.cat$qualification,levels(income.train.cat$qualification)[c(14, 4:7, 1:3, 12, 15, 8:9, 16, 10, 13, 11)])
+#dummy check
+levels(income.train.cat$qualification)
+
+```
+- Recode Other categorical variables to reduce the levels without much information loss.
+- The groupings were selected based on reference from internet on census data for income level.
+```{r}
+income.train.cat$working_sector=recode(income.train.cat$working_sector,"c('local_body','national','state')='government'")
+income.train.cat$working_sector=recode(income.train.cat$working_sector,"c('not_worked','without_pay')='nosector'")
+
+income.train.cat$occupation=recode(income.train.cat$occupation,"c('clerical','support')='clericalsupport'")
+income.train.cat$occupation=recode(income.train.cat$occupation,"c('sales','house_servant')='salesService'")
+income.train.cat$occupation=recode(income.train.cat$occupation,"c('cleaner','transport')='elementary'")
+income.train.cat$occupation=recode(income.train.cat$occupation,"c('guard','inspector')='security'")
+
+income.train.cat$marital_status=recode(income.train.cat$marital_status,"c('Married-civilian','Married-defence','Married-non-resident')='married'")
+income.train.cat$marital_status=recode(income.train.cat$marital_status,"c('Divorced','Separated','Widowed')='marriedseparated'")
+
+income.train.cat$relationship=recode(income.train.cat$relationship,"c(' Husband',' Wife')='marriedpartner'")
+```
+```{r}
+#dummy check
+str(income.train.cat)
+```
+
+```{r}
+#combine reworked numerical and categorical data
+income.train.clean = cbind(income.train.num,income.train.cat)
+#dummy check
+names(income.train.clean)
+```
+### Split train data into dev and validation sets
+```{r}
+#get equal representation from both classes i.e. "0" and "1"
+income.high = income.train.clean[which(income.train.clean$target == "1"), ]
+income.low = income.train.clean[which(income.train.clean$target == "0"), ]
+
+set.seed(123)
+
+#75/25 split
+income.rowshigh = sample(1:nrow(income.high), 0.75*nrow(income.high))
+income.rowslow = sample(1:nrow(income.low), 0.75*nrow(income.low))
+
+income.high.subset = income.high[income.rowshigh, ]
+income.low.subset = income.low[income.rowslow, ]
+
+#dev set
+income.dev = rbind(income.low.subset,income.high.subset)
+#dummy check
+dim(income.dev)
+
+#validation set
+income.high.subset_val = income.high[-income.rowshigh, ]
+income.low.subset_val = income.low[-income.rowslow,]
+income.validation = rbind(income.low.subset_val,income.high.subset_val)
+#dummy check
+dim(income.validation)
+
+```
+## Build Logistic Regression Prediction Model with training data
+- Use income.dev for training and income.validation for cross validation within training samples.
+- Following approach was used based on multiple models evaluated
+1. Baseline:  Create Manual model which utilizes variables based on manual investigation.Baseline  
+              metrics.
+2. Benchmark: Create Null MOdel, Create Complete Model. Use Step AIC and Use Model suggested by Step function.Compare.
+3. Fine Tune: Create Manual model by reducing dimensions without compromizing accuracy and other performance parameters. This gave the best accuracy among the models evaluated.
+
+### Baseline Model
+```{r}
+set.seed (456)
+
+#create train control for repeated cross validation and k=5
+train_control = trainControl(method="repeatedcv", number=10, repeats=5)
+
+#train
+baseline.fit = train(target ~ age+financial_weight+gain+loss+qualification+working_hours
+                         +working_sector+marital_status+relationship+occupation, 
+                         data=income.dev, method="glm", family=binomial, trControl=train_control,metric="Accuracy")
+
+predicted.dev = predict (baseline.fit, income.dev, type="raw")
+
+summary(baseline.fit)
+
+confusionMatrix(income.dev$target, predicted.dev)
+
+```
+
+```{r}
+#crossvalidate
+predicted.val = predict (baseline.fit, income.validation,type="raw")
+
+confusionMatrix (income.validation$target, predicted.val)
+#dummy check
+head(predicted.val)
+```
+### Benchmark
+```{r}
+null_model = glm(target ~ 1, data = income.dev,family = "binomial")
+complete_model = glm(target ~ ., data = income.dev,family = "binomial")
+
+#use stepAIC to come up with model recommending variables with lower AIC value
+step_model <- step(null_model, scope = list(lower = null_model, upper = complete_model), direction = "forward")
+
+summary(step_model) #to check lowest AIC recommended variables.
+
+```
+
+```{r}
+#selected model with AIC score(lowest) of 14666 as reported by stepAIC function.
+benchmark.fit = train(target ~ relationship + qualification + gain + 
+    occupation + loss + working_hours + age + marital_status + 
+    gender + working_sector + financial_weight + ethnicity, 
+    data=income.dev, method="glm", family=binomial, trControl=train_control,metric = "Accuracy")
+
+#dev
+predicted.dev1 = predict (benchmark.fit, income.dev, type="raw")
+
+confusionMatrix(income.dev$target, predicted.dev1)
+
+```
+
+```{r}
+#crossvalidate
+predicted.val1 = predict (benchmark.fit, income.validation,type="raw")
+
+confusionMatrix (income.validation$target, predicted.val1)
+```
+### Fine Tuned Model 
+- resulted into 84.54% accuracy for unseen data along with improvements to sensitivity & specificity
+- along with reduced dimensions (simpler model) as compared to other models tried
+
+```{r}
+#train
+finetuned.fit = train(target ~ age+gain+loss+qualification+working_hours
+                         +marital_status+relationship+occupation+gender, 
+                         data=income.dev, method="glm", family=binomial, trControl=train_control,metric="Accuracy")
+
+predicted.dev2 = predict (finetuned.fit, income.dev, type="raw")
+
+summary(finetuned.fit)
+
+confusionMatrix(income.dev$target, predicted.dev2)
+```
+
+```{r}
+#crossvalidate
+predicted.val2 = predict (finetuned.fit, income.validation,type="raw")
+
+pred.finetuned.fit = as.numeric(predicted.val2)
+
+#variable importance
+plot(varImp(finetuned.fit))
+
+#roc/auc
+roc.finetuned.fit = pROC::roc(income.validation$target,pred.finetuned.fit)
+auc.finetuned.fit = pROC::auc(roc.finetuned.fit)
+
+roc.finetuned.fit
+auc.finetuned.fit
+
+#confusion matrix - threshold
+fitpred = finetuned.fit$finalModel$fitted.values
+fitpredt = function(t) ifelse(fitpred > t, "1", "0")
+confusionMatrix (as.factor(fitpredt(0.5)), income.dev$target)
+
+#regular confusion matrix
+confusionMatrix (income.validation$target, predicted.val2)
+#dummy check
+head(predicted.val2)
+```
+## Test Model on Unseen Data
+### clean/arrange unseen data for prediction
+- similar steps as those performed for train data except NAs were handled with imputation.
+```{r}
+#read test data set
+income.test<- read.csv("F:/insofe/cute/test_data.csv")
+
+#summary
+summary(income.test)
+dim(income.test)#again out of 976 records, 804 for tax_paid are NAs
+```
+
+```{r}
+#remove pre-assessed variables
+income.test$tax_paid = NULL
+income.test$years_of_education = NULL
+```
+```{r}
+#dummy check
+names(income.test)
+```
+
+```{r}
+#handle NA values using mice
+miceMod = mice(income.test[, ], method="rf")  # perform mice imputation, based on random forests. default 5 iterations.
+income.test.imputed = complete(miceMod)  # generate the completed data.
+```
+
+```{r}
+#dummy check
+sum(is.na(income.test.imputed))
+```
+
+```{r}
+#apply same pre-processing steps as train data
+
+income.test.imputed$qualification = ordered (income.test.imputed$qualification,levels (income.test.imputed$qualification) [c(14, 4:7, 1:3, 12, 15, 8:9, 16, 10, 13, 11)])
+
+income.test.imputed$working_sector=recode(income.test.imputed$working_sector,"c('local_body','national','state')='government'")
+income.test.imputed$working_sector=recode(income.test.imputed$working_sector,"c('not_worked','without_pay')='nosector'")
+
+income.test.imputed$occupation=recode(income.test.imputed$occupation,"c('clerical','support')='clericalsupport'")
+income.test.imputed$occupation=recode(income.test.imputed$occupation,"c('sales','house_servant')='salesService'")
+income.test.imputed$occupation=recode(income.test.imputed$occupation,"c('cleaner','transport')='elementary'")
+income.test.imputed$occupation=recode(income.test.imputed$occupation,"c('guard','inspector')='security'")
+
+income.test.imputed$marital_status=recode(income.test.imputed$marital_status,"c('Married-civilian','Married-defence','Married-non-resident')='married'")
+income.test.imputed$marital_status=recode(income.test.imputed$marital_status,"c('Divorced','Separated','Widowed')='marriedseparated'")
+
+income.test.imputed$relationship=recode(income.test.imputed$relationship,"c(' Husband',' Wife')='marriedpartner'")
+
+#dummy check
+head(income.test.imputed)
+```
+### Apply three different models and generate out files for evaluation
+
+```{r}
+outcolumns = c("index","target")
+```
+
+- baseline model output
+
+```{r}
+#apply model on test data set
+income.test.imputed$target = predict (baseline.fit, income.test.imputed)
+
+#write to output file
+write.csv(income.test.imputed[,outcolumns], file = "baseline_pred.csv",row.names=FALSE)
+```
+
+- benchmark model output (stepAIC'ed model)
+```{r}
+#apply model on test data set
+income.test.imputed$target = predict (benchmark.fit, income.test.imputed)
+
+#write to output file
+write.csv(income.test.imputed[,outcolumns], file = "benchmark_pred.csv",row.names=FALSE)
+```
+
+- finetuned model output
+```{r}
+#apply model on test data set
+income.test.imputed$target = predict (finetuned.fit, income.test.imputed)
+
+#write to output file
+write.csv(income.test.imputed[,outcolumns], file = "finetuned_pred.csv",row.names=FALSE)
+```
+
+## Conclusion
+
+![A local image](Conclusion.jpg)
+
+## Additional Notes
+### Applying Naive Bayes
+- This was tried first before applying Logistic Regression
+
+```{r}
+#Fitting the Naive Bayes model (basic)
+Naive.Bayes.fit=naiveBayes(target ~., data=income.dev)
+#Check model summary
+Naive.Bayes.fit
+```
+
+```{r}
+#dev
+nb.predictions.dev=predict(Naive.Bayes.fit,income.dev)
+#Confusion matrix
+table(nb.predictions.dev,income.dev$target)
+```
+- Accuracy on dev data = (15486+2285)/21933 = 80.80%
+
+```{r}
+#validation
+nb.predictions.val=predict(Naive.Bayes.fit,income.validation)
+#Confusion matrix
+table(nb.predictions.val,income.validation$target)
+```
+- Accuracy on dev data = (5143+762)/7313 = 80.74%
+```{r}
+#test data
+nb.predictions.testd=predict(Naive.Bayes.fit,income.test.imputed)
+
+income.test.imputed$target = nb.predictions.testd
+#write to output file
+write.csv(income.test.imputed[,outcolumns], file = "naivebayes_pred.csv",row.names=FALSE)
+```
+- Accuracy reported by the exam tool = 80.94%. This still performed better than baseline accuracy of approx.70%
+- For the similar setup, Logistic regression (84.53% for fine tuned model) performed better than Naive Bayes in terms of accuracy.
+
+## Further Steps
+ - Complete seperation of probabilities (fitted probabilities numerically 0 or 1 occurred) partly because of the model..check    with regularization?
+ - Use Dummification on income.train.clean and Apply Lasso Regularization?
+ - Use year of education instead of qualification?
+ - Removing impurities from the data
+
+ 
+## Appendix
+### Plots for Numeric Variables
+
+```{r}
+boxplot (income.train.clean$age
+         ~ income.train.clean$target, 
+         main = "Age distribution for different income levels",
+         xlab = "Income Levels", ylab = "Age", col = "green")
+#age looks useful visually
+
+boxplot (income.train.clean$financial_weight
+         ~ income.train.clean$target, 
+         main = "Fin Weight distribution for different income levels",
+         xlab = "Income Levels", ylab = "Financial Weight", col = "green")
+#financial weight not so much change visually between two levels
+
+table(income.train.clean$qualification,income.train.clean$target)
+#qualification looks important
+
+boxplot (income.train.clean$gain
+         ~ income.train.clean$target, 
+         main = "Gain distribution for different income levels",
+         xlab = "Income Levels", ylab = "Gain", col = "green")
+#gain not so much useful visually
+
+boxplot (income.train.clean$loss
+         ~ income.train.clean$target, 
+         main = "loss distribution for different income levels",
+         xlab = "Income Levels", ylab = "Loss", col = "green")
+#loss not so much useful visually
+
+boxplot (income.train.clean$working_hours
+         ~ income.train.clean$target, 
+         main = "working hours distribution for different income levels",
+         xlab = "Income Levels", ylab = "Working hours", col = "green")
+#work hours looks important visually but perfectly separable based on mean?
+
+table(income.train.clean$loan_taken,income.train.clean$target)
+#does not look so important visually
+
+boxplot (income.train.clean$loan_taken
+        ~ income.train.clean$target, 
+         main = "loan taken distribution for different income levels",
+         xlab = "Income Levels", ylab = "Working hours", col = "green")
+
+#loan taken distribution among high income and low income
+#majority of the data is loan not taken for both categories.and even for 25k+ data
+#cannot visually infer relationship between loan_taken and two different
+#levels of income
+```
+
+
+### Plots for Categorical Variables
+- Understanding level of impact of one categorical variable on classiication when caused by another categorical variable.
+
+```{r}
+#e.g. Ethnicity explains variance in classification but is it impacted by other cat variable too?
+qplot(income.train.clean$target, data = income.train.clean, fill = income.train.clean$ethnicity) + facet_grid (. ~ income.train.clean$working_sector)
+
+qplot(income.train.clean$target, data = income.train.clean, fill = income.train.clean$ethnicity) + facet_grid (. ~ income.train.clean$marital_status)
+
+qplot(income.train.clean$target, data = income.train.clean, fill = income.train.clean$ethnicity) + facet_grid (. ~ income.train.clean$occupation)
+
+qplot(income.train.clean$target, data = income.train.clean, fill = income.train.clean$ethnicity) + facet_grid (. ~ income.train.clean$country)
+```
+
+
